@@ -1,0 +1,2454 @@
+#!/bin/bash
+# Run once: recreates the whole TanvirMix project in ./TanvirMix
+set -e
+mkdir -p "TanvirMix/.github/workflows"
+cat > "TanvirMix/.github/workflows/build.yml" <<'TANVIR_EOF_END'
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TanvirMix-debug
+          path: app/build/outputs/apk/debug/*.apk
+TANVIR_EOF_END
+mkdir -p "TanvirMix/."
+cat > "TanvirMix/.gitignore" <<'TANVIR_EOF_END'
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+TANVIR_EOF_END
+mkdir -p "TanvirMix/."
+cat > "TanvirMix/README.md" <<'TANVIR_EOF_END'
+# Tanvir Mix v0.5
+
+Offline-first Android media player (Kotlin + Media3/ExoPlayer). No INTERNET permission or advertising SDK.
+
+## v0.5
+- MX-style tool panel in the video player: night mode, shuffle, loop (off/one/all), mute, sleep timer, A-B repeat, audio effects (bass boost, surround, volume boost), equalizer with presets, speed, screenshot, background play, screen rotation; aspect ratio (fit/zoom/fill), PiP, lock; menu with audio track, subtitle track and video info.
+- Decoder fallback + smaller buffers for HD/any video; errors show a message and skip to the next item instead of freezing.
+- Lower heat: throttled animations, no UI ticking while controls are hidden, low-priority thumbnail threads, thumbnail loading paused while fast-scrolling, shared size-based cache, screen-on flag only while playing.
+- New mobile-style UI: folder cards with cover thumbnail, video rows with NEW tag and watched-progress line, search, vector icons, modern bottom navigation, mini player on both Video and Audio pages.
+- Audio list no longer limited to IS_MUSIC files (ringtones/notifications/alarms excluded).
+
+## v0.4.1 fixes
+- Fixed black screen when returning to a video that was playing as audio (video track stayed disabled in the service player).
+- Audio-only files now show a music card instead of a plain black screen.
+- No automatic PiP for audio-only playback.
+- Unknown artist no longer shows as "<unknown>".
+
+## v0.4 changes
+- Added a three-item bottom navigation: Video (left), Audio (center), Profile (right); removed the old separate Storage-style destination.
+- Added a separate local Audio library, grouped by device folder and showing track title, artist and duration.
+- Added audio playback using the existing Media3 playback service and playlist session.
+- Added Android 13+ READ_MEDIA_AUDIO permission handling.
+- Removed the dedicated 10-second rewind/forward buttons and labels from the video player's center controls. Left/right double-tap continues to seek by 10 seconds.
+- Removed the red circular background from the main Play/Pause control; the icon remains white.
+- Preserved existing video folder browsing, thumbnails, playback service, resume position, gestures, speed, lock and PiP implementation.
+
+## Existing video player features
+- Video folders and thumbnail list, duration and file size.
+- Folder queue with automatic next video.
+- Swipe gestures: left-side brightness, right-side volume, horizontal seeking.
+- Double tap: left side -10s, right side +10s.
+- Playback speed, screen lock, PiP, resume position and background media service.
+
+## Notes / limitations
+- This source update adds the Audio library and playback foundation. Advanced equalizer controls, subtitle file picker/synchronization, secure PIN/biometric vault, audio extraction, sleep timer, crossfade, cloud backup and restore are not implemented in this build and should not be treated as available features.
+- Audio and video access depends on the Android media permissions granted by the user. No network access is requested by the app.
+- Build verification could not be run in the current environment because Gradle and an Android SDK are not installed here. Import the project into Android Studio or run the included GitHub Actions workflow to compile and test it.
+
+## Build
+Open this folder in Android Studio and build the `app` debug variant, or push it to GitHub and run the included Build APK workflow.
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app"
+cat > "TanvirMix/app/build.gradle.kts" <<'TANVIR_EOF_END'
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.tanvir.mix"
+    compileSdk = 34
+    defaultConfig {
+        applicationId = "com.tanvir.mix"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 6
+        versionName = "0.5"
+    }
+    buildTypes {
+        release { isMinifyEnabled = false }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.media3:media3-session:1.4.1")
+    implementation("com.google.guava:guava:33.0.0-android")
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main"
+cat > "TanvirMix/app/src/main/AndroidManifest.xml" <<'TANVIR_EOF_END'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ইন্টারনেট পারমিশন ইচ্ছাকৃতভাবে নেই: পুরোপুরি অফলাইন, বিজ্ঞাপনহীন -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- v0.3: ব্যাকগ্রাউন্ড প্লেব্যাক + নোটিফিকেশন (ইন্টারনেট এখনও নেই) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:label="Tanvir Mix"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".AudioActivity" android:exported="false" />
+        <activity android:name=".ProfileActivity" android:exported="false" />
+
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/PlayerTheme"
+            android:supportsPictureInPicture="true"
+            android:screenOrientation="sensor"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/AudioActivity.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.app.Activity
+import android.content.Intent
+import android.graphics.Color
+import android.os.Bundle
+import android.provider.MediaStore
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import android.widget.Toast
+
+class AudioActivity : Activity() {
+
+    private class Holder(val card: LinearLayout, val title: TextView, val sub: TextView, val eq: EqView)
+
+    private var all: List<AudioRepo.Audio> = emptyList()
+    private var folder: String? = null
+    private lateinit var title: TextView
+    private lateinit var sub: TextView
+    private lateinit var back: ImageButton
+    private lateinit var list: ListView
+    private lateinit var mini: MiniPlayer
+    private var adapter: BaseAdapter? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        all = try { AudioRepo.queryAll(this) } catch (_: SecurityException) { emptyList() }
+        mini = MiniPlayer(this) { adapter?.notifyDataSetChanged() }
+
+        back = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_back)
+            setColorFilter(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            visibility = View.GONE
+            setOnClickListener { showFolders() }
+        }
+        title = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 26f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }
+        sub = TextView(this).apply { setTextColor(TEXT_DIM); textSize = 13f }
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            addView(title); addView(sub)
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(8))
+            addView(back); addView(titleCol)
+        }
+        list = ListView(this).apply {
+            divider = null; dividerHeight = 0
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(8))
+        }
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG)
+            addView(header)
+            addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(mini.view); addView(navBar(1))
+        })
+        mini.connect()
+        if (all.isEmpty()) Toast.makeText(this, "কোনো অডিও পাওয়া যায়নি অথবা অডিও অনুমতি নেই", Toast.LENGTH_LONG).show()
+        showFolders()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mini.resume()
+        adapter?.notifyDataSetChanged()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        mini.pause()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        mini.release()
+    }
+
+    private fun audioPlayingFolder(): String? = if (mini.nowIsAudio) mini.nowFolder else null
+
+    private fun showFolders() {
+        folder = null; back.visibility = View.GONE; title.text = "অডিও"
+        val groups = all.groupBy { it.folder }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+        val names = groups.keys.toList()
+        sub.text = "${names.size} ফোল্ডার  •  ${all.size} অডিও"
+        val a = object : BaseAdapter() {
+            override fun getCount() = names.size
+            override fun getItem(position: Int) = names[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, cv: View?, parent: ViewGroup): View {
+                val row = cv ?: makeRow(R.drawable.ic_music, 52)
+                val h = row.tag as Holder
+                val name = names[position]
+                val playing = name == audioPlayingFolder()
+                h.card.background = roundedBg(if (playing) CARD_PLAYING else CARD, dp(16).toFloat())
+                h.title.text = name
+                h.title.setTextColor(if (playing) ACCENT else Color.WHITE)
+                val count = "${groups[name]!!.size} গান"
+                h.sub.text = if (playing) "● চলছে  •  $count" else count
+                h.sub.setTextColor(if (playing) ACCENT else TEXT_DIM)
+                h.eq.visibility = if (playing) View.VISIBLE else View.GONE
+                h.eq.animating = playing && mini.nowPlaying
+                return row
+            }
+        }
+        adapter = a
+        list.adapter = a
+        list.setOnItemClickListener { _, _, pos, _ -> showTracks(names[pos]) }
+    }
+
+    private fun showTracks(name: String) {
+        folder = name; back.visibility = View.VISIBLE; title.text = name
+        val tracks = all.filter { it.folder == name }
+        sub.text = "${tracks.size} গান"
+        val a = object : BaseAdapter() {
+            override fun getCount() = tracks.size
+            override fun getItem(position: Int) = tracks[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, cv: View?, parent: ViewGroup): View {
+                val row = cv ?: makeRow(R.drawable.ic_music, 44)
+                val h = row.tag as Holder
+                val t = tracks[position]
+                val playing = mini.nowIsAudio && mini.nowId == t.uri.toString()
+                h.card.background = roundedBg(if (playing) CARD_PLAYING else CARD, dp(16).toFloat())
+                h.title.text = t.title
+                h.title.setTextColor(if (playing) ACCENT else Color.WHITE)
+                h.sub.text = "${t.artist}  •  ${fmtTime(t.duration)}"
+                h.sub.setTextColor(if (playing) ACCENT else TEXT_DIM)
+                h.eq.visibility = if (playing) View.VISIBLE else View.GONE
+                h.eq.animating = playing && mini.nowPlaying
+                return row
+            }
+        }
+        adapter = a
+        list.adapter = a
+        list.setOnItemClickListener { _, _, pos, _ ->
+            startActivity(
+                Intent(this, PlayerActivity::class.java)
+                    .putExtra(PlayerActivity.EXTRA_AUDIO, true)
+                    .putExtra(PlayerActivity.EXTRA_AUDIO_FOLDER, name)
+                    .putExtra(PlayerActivity.EXTRA_AUDIO_URI, tracks[pos].uri.toString())
+            )
+        }
+        list.setSelection(0)
+    }
+
+    private fun makeRow(iconRes: Int, boxDp: Int): View {
+        val box = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(boxDp), dp(boxDp))
+            background = roundedBg(PLACEHOLDER, dp(14).toFloat())
+            addView(ImageView(this@AudioActivity).apply {
+                setImageResource(iconRes); setColorFilter(ACCENT)
+            }, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+        }
+        val t = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 16f
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }
+        val s = TextView(this).apply {
+            setTextColor(TEXT_DIM); textSize = 12.5f
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(3), 0, 0)
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = dp(14); rightMargin = dp(8) }
+            addView(t); addView(s)
+        }
+        val eq = EqView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+            visibility = View.GONE
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(10), dp(14), dp(10))
+            addView(box); addView(col); addView(eq)
+        }
+        return FrameLayout(this).apply {
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            addView(card, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            tag = Holder(card, t, s, eq)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() { if (folder != null) showFolders() else super.onBackPressed() }
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/AudioRepo.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.content.ContentUris
+import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+
+object AudioRepo {
+    data class Audio(val uri: Uri, val title: String, val folder: String, val artist: String, val duration: Long, val size: Long, val date: Long)
+
+    fun queryAll(ctx: Context): List<Audio> {
+        val out = ArrayList<Audio>()
+        val folderColumn = if (Build.VERSION.SDK_INT >= 29) MediaStore.Audio.Media.RELATIVE_PATH else MediaStore.Audio.Media.DATA
+        val projection = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.DURATION,
+            MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.DATE_ADDED, folderColumn)
+        ctx.contentResolver.query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection,
+            "${MediaStore.Audio.Media.IS_RINGTONE} = 0 AND ${MediaStore.Audio.Media.IS_NOTIFICATION} = 0 AND ${MediaStore.Audio.Media.IS_ALARM} = 0", null, "${MediaStore.Audio.Media.DATE_ADDED} DESC")?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                val rawPath = c.getString(7) ?: "Music/"
+                val path = if (Build.VERSION.SDK_INT >= 29) rawPath.trimEnd('/') else rawPath.substringBeforeLast('/')
+                val folder = path.substringAfterLast('/').ifBlank { "Music" }
+                out += Audio(ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id),
+                    (c.getString(1) ?: "Unknown audio").substringBeforeLast('.'), folder,
+                    c.getString(3)?.takeIf { it != "<unknown>" } ?: "Unknown artist", c.getLong(4), c.getLong(5), c.getLong(6))
+            }
+        }
+        return out
+    }
+
+    fun toItem(a: Audio): MediaItem = MediaItem.Builder().setUri(a.uri).setMediaId(a.uri.toString())
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(a.title).setArtist(a.artist)
+            .setAlbumTitle(a.folder).build()).build()
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/Fx.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.media.audiofx.BassBoost
+import android.media.audiofx.Equalizer
+import android.media.audiofx.LoudnessEnhancer
+import android.media.audiofx.Virtualizer
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import androidx.media3.common.Player
+
+/** ইকুয়ালাইজার ও অডিও ইফেক্ট। প্লেয়ারের audio session-এ যুক্ত হয়; সেটিংস সেভ থাকে। */
+object Fx {
+    private var prefs: SharedPreferences? = null
+    private var eq: Equalizer? = null
+    private var bass: BassBoost? = null
+    private var virt: Virtualizer? = null
+    private var loud: LoudnessEnhancer? = null
+
+    var eqOn = false
+        private set
+    var bassLv = 0
+        private set
+    var virtLv = 0
+        private set
+    var loudLv = 0
+        private set
+
+    fun init(ctx: Context) {
+        val p = ctx.applicationContext.getSharedPreferences("fx", Context.MODE_PRIVATE)
+        prefs = p
+        eqOn = p.getBoolean("eqOn", false)
+        bassLv = p.getInt("bass", 0)
+        virtLv = p.getInt("virt", 0)
+        loudLv = p.getInt("loud", 0)
+    }
+
+    fun attach(sessionId: Int) {
+        release()
+        if (sessionId == 0) return
+        try { eq = Equalizer(0, sessionId) } catch (e: Throwable) { eq = null }
+        try { bass = BassBoost(0, sessionId) } catch (e: Throwable) { bass = null }
+        try { virt = Virtualizer(0, sessionId) } catch (e: Throwable) { virt = null }
+        try { loud = LoudnessEnhancer(sessionId) } catch (e: Throwable) { loud = null }
+        applyAll()
+    }
+
+    fun release() {
+        try { eq?.release() } catch (e: Throwable) { }
+        try { bass?.release() } catch (e: Throwable) { }
+        try { virt?.release() } catch (e: Throwable) { }
+        try { loud?.release() } catch (e: Throwable) { }
+        eq = null; bass = null; virt = null; loud = null
+    }
+
+    private fun applyAll() {
+        try {
+            eq?.let { e ->
+                val range = e.bandLevelRange
+                for (i in 0 until e.numberOfBands.toInt()) {
+                    val lv = prefs?.getInt("b$i", Int.MIN_VALUE) ?: Int.MIN_VALUE
+                    if (lv != Int.MIN_VALUE) {
+                        e.setBandLevel(i.toShort(), lv.coerceIn(range[0].toInt(), range[1].toInt()).toShort())
+                    }
+                }
+                e.setEnabled(eqOn)
+            }
+        } catch (e: Throwable) { }
+        setBass(bassLv)
+        setVirt(virtLv)
+        setLoud(loudLv)
+    }
+
+    fun available() = eq != null || bass != null || virt != null || loud != null
+    fun eqAvailable() = eq != null
+
+    // ----- ইকুয়ালাইজার -----
+    fun setEqOn(on: Boolean) {
+        eqOn = on
+        try { eq?.setEnabled(on) } catch (e: Throwable) { }
+        prefs?.edit()?.putBoolean("eqOn", on)?.apply()
+    }
+
+    fun bandCount(): Int = try { eq?.numberOfBands?.toInt() ?: 0 } catch (e: Throwable) { 0 }
+    fun minLevel(): Int = try { eq?.bandLevelRange?.get(0)?.toInt() ?: -1500 } catch (e: Throwable) { -1500 }
+    fun maxLevel(): Int = try { eq?.bandLevelRange?.get(1)?.toInt() ?: 1500 } catch (e: Throwable) { 1500 }
+    fun freqHz(i: Int): Int = try { (eq?.getCenterFreq(i.toShort()) ?: 0) / 1000 } catch (e: Throwable) { 0 }
+    fun level(i: Int): Int = try { eq?.getBandLevel(i.toShort())?.toInt() ?: 0 } catch (e: Throwable) { 0 }
+
+    fun setLevel(i: Int, lv: Int) {
+        try { eq?.setBandLevel(i.toShort(), lv.coerceIn(minLevel(), maxLevel()).toShort()) } catch (e: Throwable) { }
+    }
+
+    fun presetCount(): Int = try { eq?.numberOfPresets?.toInt() ?: 0 } catch (e: Throwable) { 0 }
+    fun presetName(i: Int): String = try { eq?.getPresetName(i.toShort()) ?: "" } catch (e: Throwable) { "" }
+    fun usePreset(i: Int) { try { eq?.usePreset(i.toShort()) } catch (e: Throwable) { } }
+    fun currentPreset(): Int = try { eq?.currentPreset?.toInt() ?: -1 } catch (e: Throwable) { -1 }
+
+    // ----- ইফেক্ট -----
+    fun setBass(v: Int) {
+        bassLv = v
+        try {
+            bass?.let { b ->
+                b.setEnabled(v > 0)
+                if (b.strengthSupported) b.setStrength(v.toShort())
+            }
+        } catch (e: Throwable) { }
+    }
+
+    fun setVirt(v: Int) {
+        virtLv = v
+        try {
+            virt?.let { x ->
+                x.setEnabled(v > 0)
+                if (x.strengthSupported) x.setStrength(v.toShort())
+            }
+        } catch (e: Throwable) { }
+    }
+
+    fun setLoud(v: Int) {
+        loudLv = v
+        try {
+            loud?.let { l ->
+                l.setTargetGain(v)
+                l.setEnabled(v > 0)
+            }
+        } catch (e: Throwable) { }
+    }
+
+    fun save() {
+        val e = prefs?.edit() ?: return
+        e.putBoolean("eqOn", eqOn)
+        e.putInt("bass", bassLv); e.putInt("virt", virtLv); e.putInt("loud", loudLv)
+        for (i in 0 until bandCount()) e.putInt("b$i", level(i))
+        e.apply()
+    }
+}
+
+/** স্লিপ টাইমার — সার্ভিসের প্লেয়ারে সরাসরি কাজ করে, স্ক্রিন বন্ধ থাকলেও। */
+object SleepTimer {
+    var player: Player? = null
+    private var endAt = 0L
+    private val h = Handler(Looper.getMainLooper())
+    private val fire = Runnable {
+        player?.pause()
+        endAt = 0L
+    }
+
+    val active: Boolean get() = endAt > SystemClock.elapsedRealtime()
+
+    fun start(minutes: Int) {
+        h.removeCallbacks(fire)
+        endAt = SystemClock.elapsedRealtime() + minutes * 60_000L
+        h.postDelayed(fire, minutes * 60_000L)
+    }
+
+    fun cancel() {
+        h.removeCallbacks(fire)
+        endAt = 0L
+    }
+
+    fun remainingMin(): Int =
+        if (active) ((endAt - SystemClock.elapsedRealtime()) / 60_000L + 1).toInt() else 0
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/MainActivity.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
+import android.text.Editable
+import android.text.InputType
+import android.text.TextUtils
+import android.text.TextWatcher
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.widget.AbsListView
+import android.widget.BaseAdapter
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import android.widget.Toast
+
+class MainActivity : Activity() {
+
+    private class Holder(
+        val card: LinearLayout,
+        val title: TextView,
+        val sub: TextView,
+        val thumb: ImageView,
+        val badge: TextView?,
+        val newTag: TextView?,
+        val prog: View?,
+        val scrim: View?,
+        val eq: EqView
+    )
+
+    private companion object {
+        const val THUMB_W = 124
+        const val THUMB_H = 70
+    }
+
+    private lateinit var listView: ListView
+    private lateinit var headerTitle: TextView
+    private lateinit var headerSub: TextView
+    private lateinit var backBtn: ImageButton
+    private lateinit var searchBtn: ImageButton
+    private lateinit var searchBox: EditText
+    private lateinit var mini: MiniPlayer
+    private lateinit var resumePrefs: SharedPreferences
+
+    private var all: List<MediaRepo.Video> = emptyList()
+    private var currentFolder: String? = null
+    private var adapter: BaseAdapter? = null
+    private var query = ""
+    private var flinging = false
+    private var lastLoad = 0L
+    private var lastKey = Pair(-1, 0L)
+    private var lastScrolledId: String? = null
+
+    private val permission: String
+        get() = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private val audioPermission: String
+        get() = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    // ---------- লাইফসাইকেল ----------
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        title = "Tanvir Mix"
+        resumePrefs = getSharedPreferences("resume", MODE_PRIVATE)
+        mini = MiniPlayer(this) {
+            adapter?.notifyDataSetChanged()
+            scrollToNowIfNeeded()
+        }
+        buildUi()
+        mini.connect()
+
+        val need = ArrayList<String>()
+        val hasVideoPerm = checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+        if (!hasVideoPerm) need += permission
+        if (checkSelfPermission(audioPermission) != PackageManager.PERMISSION_GRANTED && audioPermission !in need) need += audioPermission
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) need += Manifest.permission.POST_NOTIFICATIONS
+
+        if (hasVideoPerm) loadVideos(force = true)
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
+    }
+
+    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(code, perms, results)
+        val i = perms.indexOf(permission)
+        if (i >= 0 && results.getOrNull(i) == PackageManager.PERMISSION_GRANTED) loadVideos(force = true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mini.resume()
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED &&
+            SystemClock.elapsedRealtime() - lastLoad > 30_000
+        ) loadVideos(force = false)
+        adapter?.notifyDataSetChanged() // দেখার অগ্রগতি বার নতুন করে আঁকে
+        scrollToNowIfNeeded()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        mini.pause()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        when {
+            searchBox.visibility == View.VISIBLE -> closeSearch()
+            currentFolder != null -> showFolders()
+            else -> super.onBackPressed()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        mini.release()
+    }
+
+    // ---------- UI তৈরি ----------
+
+    private fun buildUi() {
+        backBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_back)
+            setColorFilter(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            visibility = View.GONE
+            setOnClickListener { showFolders() }
+        }
+        headerTitle = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 26f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }
+        headerSub = TextView(this).apply { setTextColor(TEXT_DIM); textSize = 13f }
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            addView(headerTitle); addView(headerSub)
+        }
+        searchBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_search)
+            setColorFilter(Color.WHITE)
+            background = roundedBg(0xFF1E222B.toInt(), dp(22).toFloat())
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            setOnClickListener { if (searchBox.visibility == View.VISIBLE) closeSearch() else openSearch() }
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(8))
+            addView(backBtn); addView(titleCol); addView(searchBtn)
+        }
+
+        searchBox = EditText(this).apply {
+            hint = "ভিডিও বা ফোল্ডার খুঁজুন"
+            setHintTextColor(TEXT_DIM); setTextColor(Color.WHITE); textSize = 15f
+            background = roundedBg(0xFF1E222B.toInt(), dp(14).toFloat())
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            inputType = InputType.TYPE_CLASS_TEXT
+            maxLines = 1
+            visibility = View.GONE
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: Editable?) {
+                    val q = s?.toString()?.trim() ?: ""
+                    if (q != query) { query = q; render() }
+                }
+            })
+        }
+        val searchWrap = FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(8))
+            addView(searchBox, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+        listView = ListView(this).apply {
+            divider = null
+            dividerHeight = 0
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(8))
+            setOnScrollListener(object : AbsListView.OnScrollListener {
+                override fun onScrollStateChanged(v: AbsListView, state: Int) {
+                    val fl = state == AbsListView.OnScrollListener.SCROLL_STATE_FLING
+                    if (flinging && !fl) { flinging = false; this@MainActivity.adapter?.notifyDataSetChanged() }
+                    flinging = fl
+                }
+                override fun onScroll(v: AbsListView, first: Int, visible: Int, total: Int) {}
+            })
+        }
+
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG)
+            addView(header); addView(searchWrap)
+            addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(mini.view); addView(navBar(0))
+        })
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    }
+
+    private fun openSearch() {
+        searchBox.visibility = View.VISIBLE
+        searchBox.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showSoftInput(searchBox, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun closeSearch() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(searchBox.windowToken, 0)
+        searchBox.setText("")
+        searchBox.visibility = View.GONE
+        query = ""
+        render()
+    }
+
+    private fun render() {
+        val f = currentFolder
+        if (f != null) showVideos(f) else showFolders()
+    }
+
+    // ---------- এখন কী বাজছে ----------
+
+    /** ফোল্ডারের ভেতরে থাকলে এবং গান বদলালে বর্তমান গানে স্ক্রল করে। */
+    private fun scrollToNowIfNeeded() {
+        val folder = currentFolder ?: return
+        val id = mini.nowId ?: return
+        if (mini.nowIsAudio || mini.nowFolder != folder || id == lastScrolledId) return
+        val idx = MediaRepo.sortedInFolder(all, folder).indexOfFirst { it.uri.toString() == id }
+        if (idx >= 0) {
+            lastScrolledId = id
+            listView.post { listView.smoothScrollToPosition(idx) }
+        }
+    }
+
+    // ---------- ডাটা লোড ----------
+
+    private fun loadVideos(force: Boolean) {
+        lastLoad = SystemClock.elapsedRealtime()
+        val list = MediaRepo.queryAll(this)
+        val key = Pair(list.size, list.sumOf { it.dateAdded })
+        if (!force && key == lastKey) return // কিছু বদলায়নি — স্ক্রল জায়গায় থাকবে
+        lastKey = key
+        all = list
+        if (all.isEmpty()) Toast.makeText(this, "কোনো ভিডিও পাওয়া যায়নি", Toast.LENGTH_LONG).show()
+        render()
+    }
+
+    private fun filtered(): List<MediaRepo.Video> =
+        if (query.isBlank()) all
+        else all.filter { it.title.contains(query, true) || it.folder.contains(query, true) }
+
+    // ---------- স্ক্রিন ১: ফোল্ডার লিস্ট ----------
+
+    private fun showFolders() {
+        currentFolder = null
+        backBtn.visibility = View.GONE
+        headerTitle.text = "Tanvir Mix"
+        val src = filtered()
+        val groups = src.groupBy { it.folder }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+        val names = groups.keys.toList()
+        val covers = names.map { n -> groups[n]!!.maxByOrNull { it.dateAdded }!! }
+        val sizes = names.map { n -> groups[n]!!.sumOf { it.size } }
+        headerSub.text = "${names.size} ফোল্ডার  •  ${src.size} ভিডিও"
+
+        val a = object : BaseAdapter() {
+            override fun getCount() = names.size
+            override fun getItem(p: Int) = names[p]
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup): View {
+                val row = cv ?: folderRow()
+                val h = row.tag as Holder
+                val name = names[p]
+                val n = groups[name]!!.size
+                val playing = name == mini.nowFolder && !mini.nowIsAudio
+                h.card.background = roundedBg(if (playing) CARD_PLAYING else CARD, dp(16).toFloat())
+                h.title.text = name
+                h.title.setTextColor(if (playing) ACCENT else Color.WHITE)
+                val count = "$n ভিডিও  •  ${fmtSize(sizes[p])}"
+                h.sub.text = if (playing) "● চলছে  •  $count" else count
+                h.sub.setTextColor(if (playing) ACCENT else TEXT_DIM)
+                h.eq.visibility = if (playing) View.VISIBLE else View.GONE
+                h.eq.animating = playing && mini.nowPlaying
+                bindThumb(covers[p].uri, h.thumb)
+                return row
+            }
+        }
+        adapter = a
+        listView.adapter = a
+        listView.setOnItemClickListener { _, _, pos, _ ->
+            val name = names[pos]
+            if (searchBox.visibility == View.VISIBLE) {
+                searchBox.setText("")
+                searchBox.visibility = View.GONE
+                query = ""
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .hideSoftInputFromWindow(searchBox.windowToken, 0)
+            }
+            showVideos(name)
+        }
+    }
+
+    // ---------- স্ক্রিন ২: ফোল্ডারের ভেতরের ভিডিও ----------
+
+    private fun showVideos(folder: String) {
+        currentFolder = folder
+        backBtn.visibility = View.VISIBLE
+        headerTitle.text = folder
+        val src = if (query.isBlank()) all else all.filter { it.title.contains(query, true) }
+        val videos = MediaRepo.sortedInFolder(src, folder)
+        headerSub.text = "${videos.size} ভিডিও"
+
+        val a = object : BaseAdapter() {
+            override fun getCount() = videos.size
+            override fun getItem(p: Int) = videos[p]
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup): View {
+                val row = cv ?: videoRow()
+                val h = row.tag as Holder
+                val v = videos[p]
+                val id = v.uri.toString()
+                val playing = !mini.nowIsAudio && mini.nowFolder == folder && id == mini.nowId
+                h.card.background = roundedBg(if (playing) CARD_PLAYING else CARD, dp(16).toFloat())
+                h.title.text = v.title
+                h.title.setTextColor(if (playing) ACCENT else Color.WHITE)
+                h.sub.text = if (playing) "● চলছে  •  ${fmtSize(v.size)}" else fmtSize(v.size)
+                h.sub.setTextColor(if (playing) ACCENT else TEXT_DIM)
+                h.badge!!.text = fmtTime(v.durationMs)
+                h.scrim!!.visibility = if (playing) View.VISIBLE else View.GONE
+                h.eq.visibility = if (playing) View.VISIBLE else View.GONE
+                h.eq.animating = playing && mini.nowPlaying
+                h.newTag!!.visibility = if (Seen.isNew(this@MainActivity, v)) View.VISIBLE else View.GONE
+                // কতটুকু দেখা হয়েছে তার লাল রেখা
+                val resume = resumePrefs.getLong(id, 0L)
+                val frac = if (v.durationMs > 0 && resume > 0) (resume.toFloat() / v.durationMs).coerceIn(0f, 1f) else 0f
+                val lp = h.prog!!.layoutParams as FrameLayout.LayoutParams
+                lp.width = (dp(THUMB_W) * frac).toInt()
+                h.prog.layoutParams = lp
+                h.prog.visibility = if (frac > 0.01f) View.VISIBLE else View.GONE
+                bindThumb(v.uri, h.thumb)
+                return row
+            }
+        }
+        adapter = a
+        listView.adapter = a
+        listView.setOnItemClickListener { _, _, pos, _ ->
+            startActivity(
+                Intent(this, PlayerActivity::class.java)
+                    .setData(videos[pos].uri)
+                    .putExtra(PlayerActivity.EXTRA_FOLDER, folder)
+            )
+        }
+
+        val idx = videos.indexOfFirst { !mini.nowIsAudio && mini.nowFolder == folder && it.uri.toString() == mini.nowId }
+        if (idx >= 0 && query.isBlank()) {
+            lastScrolledId = mini.nowId
+            listView.setSelection((idx - 1).coerceAtLeast(0))
+        } else {
+            lastScrolledId = null
+            listView.setSelection(0)
+        }
+    }
+
+    /** দ্রুত স্ক্রলের সময় নতুন থাম্বনেইল লোড করে না (ফোন গরম কম হয়)। */
+    private fun bindThumb(uri: android.net.Uri, iv: ImageView) {
+        iv.tag = uri.toString()
+        val hit = Thumbs.cached(uri)
+        when {
+            hit != null -> iv.setImageBitmap(hit)
+            flinging -> iv.setImageDrawable(null)
+            else -> Thumbs.load(this, uri, iv, 320, 180)
+        }
+    }
+
+    // ---------- সারির ডিজাইন ----------
+
+    private fun folderRow(): View {
+        val thumb = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(PLACEHOLDER)
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+            clipRound(dp(14).toFloat())
+        }
+        val title = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 17f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }
+        val sub = TextView(this).apply {
+            setTextColor(TEXT_DIM); textSize = 12.5f
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(3), 0, 0)
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = dp(14); rightMargin = dp(8) }
+            addView(title); addView(sub)
+        }
+        val eq = EqView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply { rightMargin = dp(6) }
+            visibility = View.GONE
+        }
+        val chevron = ImageView(this).apply {
+            setImageResource(R.drawable.ic_chevron)
+            setColorFilter(TEXT_DIM)
+            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(10), dp(12), dp(10))
+            addView(thumb); addView(col); addView(eq); addView(chevron)
+        }
+        return FrameLayout(this).apply {
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            addView(card, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            tag = Holder(card, title, sub, thumb, null, null, null, null, eq)
+        }
+    }
+
+    private fun videoRow(): View {
+        val thumb = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        val scrim = View(this).apply {
+            setBackgroundColor(0x99000000.toInt()); visibility = View.GONE
+        }
+        val eq = EqView(this).apply { visibility = View.GONE }
+        val badge = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 11f
+            background = roundedBg(0xCC000000.toInt(), dp(5).toFloat())
+            setPadding(dp(5), dp(1), dp(5), dp(1))
+        }
+        val newTag = TextView(this).apply {
+            text = "NEW"; setTextColor(Color.WHITE); textSize = 9f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            background = roundedBg(ACCENT, dp(5).toFloat())
+            setPadding(dp(5), dp(1), dp(5), dp(1))
+            visibility = View.GONE
+        }
+        val prog = View(this).apply { setBackgroundColor(ACCENT); visibility = View.GONE }
+        val box = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(THUMB_W), dp(THUMB_H))
+            setBackgroundColor(PLACEHOLDER)
+            clipRound(dp(12).toFloat())
+            val mp = ViewGroup.LayoutParams.MATCH_PARENT
+            addView(thumb, FrameLayout.LayoutParams(mp, mp))
+            addView(scrim, FrameLayout.LayoutParams(mp, mp))
+            addView(eq, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
+            addView(newTag, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START
+            ).apply { setMargins(dp(5), dp(5), 0, 0) })
+            addView(badge, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.END
+            ).apply { setMargins(0, 0, dp(5), dp(6)) })
+            addView(prog, FrameLayout.LayoutParams(0, dp(3), Gravity.BOTTOM or Gravity.START))
+        }
+        val title = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 15f
+            maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+        }
+        val sub = TextView(this).apply {
+            setTextColor(TEXT_DIM); textSize = 12f
+            setPadding(0, dp(4), 0, 0)
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = dp(12) }
+            addView(title); addView(sub)
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(12), dp(8))
+            addView(box); addView(col)
+        }
+        return FrameLayout(this).apply {
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            addView(card, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            tag = Holder(card, title, sub, thumb, badge, newTag, prog, scrim, eq)
+        }
+    }
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/MediaRepo.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.content.Context
+import android.content.ContentUris
+import android.net.Uri
+import android.provider.MediaStore
+import android.provider.OpenableColumns
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+
+object MediaRepo {
+
+    data class Video(
+        val uri: Uri,
+        val title: String,
+        val folder: String,
+        val durationMs: Long,
+        val size: Long,
+        val dateAdded: Long
+    )
+
+    fun queryAll(ctx: Context): List<Video> {
+        val list = ArrayList<Video>()
+        val projection = arrayOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.DURATION,
+            MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Video.Media.SIZE,
+            MediaStore.Video.Media.DATE_ADDED
+        )
+        ctx.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI, projection, null, null, null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                list += Video(
+                    ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id),
+                    (c.getString(1) ?: "Unknown").substringBeforeLast('.'),
+                    c.getString(3) ?: "Other",
+                    c.getLong(2),
+                    c.getLong(4),
+                    c.getLong(5)
+                )
+            }
+        }
+        return list
+    }
+
+    /** ফোল্ডারের ভিডিও, লিস্টে যে ক্রমে দেখানো হয় সেই ক্রমেই (নতুন আগে)। */
+    fun sortedInFolder(all: List<Video>, folder: String): List<Video> =
+        all.filter { it.folder == folder }.sortedByDescending { it.dateAdded }
+
+    fun inFolder(ctx: Context, folder: String): List<Video> = sortedInFolder(queryAll(ctx), folder)
+
+    fun toItem(v: Video): MediaItem = MediaItem.Builder()
+        .setUri(v.uri)
+        .setMediaId(v.uri.toString())
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(v.title)
+                .setAlbumTitle(v.folder)
+                .setArtworkUri(v.uri)
+                .build()
+        )
+        .build()
+
+    /** বাইরের অ্যাপ (ফাইল ম্যানেজার ইত্যাদি) থেকে খোলা একক ভিডিওর জন্য। */
+    fun singleItem(ctx: Context, uri: Uri): MediaItem {
+        var name: String? = null
+        try {
+            ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) name = it.getString(0) }
+        } catch (e: Exception) { }
+        val title = (name ?: uri.lastPathSegment ?: "Video").substringBeforeLast('.')
+        return MediaItem.Builder()
+            .setUri(uri)
+            .setMediaId(uri.toString())
+            .setMediaMetadata(
+                MediaMetadata.Builder().setTitle(title).setArtworkUri(uri).build()
+            )
+            .build()
+    }
+}
+
+/**
+ * "NEW" ট্যাগের হিসাব: যে ভিডিও একবারও প্লে হয়নি সেটাই NEW।
+ * প্রথমবার চালুর সময় আগের পুরনো ভিডিওগুলো (৩ দিনের বেশি পুরনো) দেখা ধরা হয়,
+ * যাতে পুরো লাইব্রেরি একসাথে NEW হয়ে না যায়।
+ */
+object Seen {
+    private const val PREFS = "seen"
+    private const val KEY_BASE = "_baseline"
+    private var ids: MutableSet<String>? = null
+    private var baseline = 0L
+
+    @Synchronized
+    private fun load(ctx: Context): MutableSet<String> {
+        ids?.let { return it }
+        val p = ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        baseline = p.getLong(KEY_BASE, 0L)
+        if (baseline == 0L) {
+            baseline = System.currentTimeMillis() / 1000 - 3 * 86400
+            p.edit().putLong(KEY_BASE, baseline).apply()
+        }
+        val set = HashSet(p.getStringSet("ids", emptySet()) ?: emptySet())
+        ids = set
+        return set
+    }
+
+    @Synchronized
+    fun isNew(ctx: Context, v: MediaRepo.Video): Boolean {
+        val set = load(ctx)
+        return v.dateAdded >= baseline && v.uri.toString() !in set
+    }
+
+    @Synchronized
+    fun mark(ctx: Context, id: String?) {
+        if (id == null) return
+        val set = load(ctx)
+        if (set.add(id)) {
+            ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putStringSet("ids", HashSet(set)).apply()
+        }
+    }
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/Mini.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.app.Activity
+import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import androidx.media3.common.Player
+import androidx.media3.session.MediaController
+import com.google.common.util.concurrent.ListenableFuture
+
+/** নিচের মিনি প্লেয়ার — ভিডিও ও অডিও দুই পেজেই একই কোড। */
+class MiniPlayer(private val act: Activity, private val onNowChanged: () -> Unit) {
+
+    var nowId: String? = null
+        private set
+    var nowFolder: String? = null
+        private set
+    var nowPlaying = false
+        private set
+    val nowIsAudio: Boolean get() = nowId?.contains("/audio/") == true
+
+    private var controller: MediaController? = null
+    private var future: ListenableFuture<MediaController>? = null
+    private val ui = Handler(Looper.getMainLooper())
+    private var running = false
+    private var thumbKey: String? = null
+
+    private val progress = ProgressBar(act, null, android.R.attr.progressBarStyleHorizontal).apply {
+        progressTintList = ColorStateList.valueOf(ACCENT)
+        progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(2))
+    }
+    private val thumb = ImageView(act).apply {
+        scaleType = ImageView.ScaleType.CENTER_CROP
+        setBackgroundColor(PLACEHOLDER)
+        layoutParams = LinearLayout.LayoutParams(act.dp(56), act.dp(40))
+        clipRound(act.dp(8).toFloat())
+    }
+    private val title = android.widget.TextView(act).apply {
+        setTextColor(Color.WHITE); textSize = 14f
+        maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+    }
+    private val sub = android.widget.TextView(act).apply {
+        setTextColor(TEXT_DIM); textSize = 12f
+        maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+    }
+    private val playBtn: ImageButton
+
+    val view: LinearLayout
+
+    private val listener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) { refresh() }
+    }
+
+    private val tick = object : Runnable {
+        override fun run() {
+            updateProgress()
+            schedule()
+        }
+    }
+
+    init {
+        val col = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = act.dp(10); rightMargin = act.dp(4) }
+            addView(title); addView(sub)
+        }
+        val prev = icon(R.drawable.ic_prev) { controller?.seekToPreviousMediaItem() }
+        playBtn = icon(R.drawable.ic_pause) { toggle() }
+        val next = icon(R.drawable.ic_next) { controller?.seekToNextMediaItem() }
+        val close = icon(R.drawable.ic_close) { controller?.run { stop(); clearMediaItems() } }
+        val row = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(act.dp(12), act.dp(8), act.dp(6), act.dp(8))
+            addView(thumb); addView(col)
+            addView(prev); addView(playBtn); addView(next); addView(close)
+        }
+        view = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF1B1F27.toInt())
+            visibility = View.GONE
+            addView(progress); addView(row)
+            setOnClickListener { act.startActivity(Intent(act, PlayerActivity::class.java)) }
+        }
+    }
+
+    private fun icon(res: Int, onClick: () -> Unit) = ImageButton(act).apply {
+        setImageResource(res)
+        setColorFilter(Color.WHITE)
+        setBackgroundColor(Color.TRANSPARENT)
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setPadding(act.dp(10), act.dp(10), act.dp(10), act.dp(10))
+        layoutParams = LinearLayout.LayoutParams(act.dp(44), act.dp(44))
+        setOnClickListener { onClick() }
+    }
+
+    private fun toggle() {
+        val c = controller ?: return
+        if (c.playWhenReady && c.playbackState != Player.STATE_ENDED) c.pause()
+        else {
+            if (c.playbackState == Player.STATE_ENDED) c.seekToDefaultPosition()
+            c.play()
+        }
+    }
+
+    fun connect() {
+        future = PlayerLink.connect(act) { c ->
+            controller = c
+            c.addListener(listener)
+            refresh()
+        }
+    }
+
+    fun resume() {
+        running = true
+        refresh()
+    }
+
+    fun pause() {
+        running = false
+        ui.removeCallbacks(tick)
+    }
+
+    fun release() {
+        running = false
+        ui.removeCallbacksAndMessages(null)
+        controller?.removeListener(listener)
+        future?.let { MediaController.releaseFuture(it) }
+        controller = null
+    }
+
+    private fun schedule() {
+        ui.removeCallbacks(tick)
+        if (running && controller?.isPlaying == true && view.visibility == View.VISIBLE) {
+            ui.postDelayed(tick, 1000)
+        }
+    }
+
+    private fun updateProgress() {
+        val c = controller ?: return
+        val dur = if (c.duration > 0) c.duration else 0L
+        progress.max = dur.toInt()
+        progress.progress = c.currentPosition.coerceIn(0L, dur).toInt()
+    }
+
+    private fun refresh() {
+        val c = controller
+        val old = Triple(nowId, nowFolder, nowPlaying)
+        if (c == null || c.mediaItemCount == 0) {
+            nowId = null; nowFolder = null; nowPlaying = false
+            view.visibility = View.GONE
+            thumbKey = null
+        } else {
+            val item = c.currentMediaItem
+            nowId = item?.mediaId
+            nowFolder = item?.mediaMetadata?.albumTitle?.toString()
+            nowPlaying = c.isPlaying
+            view.visibility = View.VISIBLE
+            title.text = item?.mediaMetadata?.title ?: ""
+            sub.text = nowFolder ?: ""
+            val playing = c.playWhenReady && c.playbackState != Player.STATE_ENDED
+            playBtn.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+            val id = nowId
+            if (id != null && id != thumbKey) {
+                thumbKey = id
+                Thumbs.load(act, Uri.parse(id), thumb, 160, 120)
+            }
+            updateProgress()
+        }
+        schedule()
+        if (old != Triple(nowId, nowFolder, nowPlaying)) onNowChanged()
+    }
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/PlaybackService.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.app.PendingIntent
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.util.Log
+import android.util.Size
+import android.widget.Toast
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.BitmapLoader
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.session.MediaController
+import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
+import java.util.concurrent.Callable
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+
+/**
+ * ব্যাকগ্রাউন্ড প্লেব্যাক + নোটিফিকেশন + লক স্ক্রিন কন্ট্রোল।
+ * প্লেয়ার এখানেই থাকে, তাই অ্যাপ বন্ধ/মিনিমাইজ করলেও গান চলে।
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+class PlaybackService : MediaSessionService() {
+
+    private var session: MediaSession? = null
+    private lateinit var exo: ExoPlayer
+    private val handler = Handler(Looper.getMainLooper())
+
+    private val saver = object : Runnable {
+        override fun run() {
+            saveResume()
+            handler.postDelayed(this, 10_000)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Fx.init(this)
+        // HD/HEVC ইত্যাদিতে হার্ডওয়্যার ডিকোডার ব্যর্থ হলে নিজে থেকে অন্য ডিকোডারে যাবে
+        val renderers = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
+        // লোকাল ফাইলে ছোট বাফারই যথেষ্ট — মেমোরি ও গরম কম
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(10_000, 25_000, 1_000, 2_000)
+            .build()
+        exo = ExoPlayer.Builder(this, renderers)
+            .setLoadControl(loadControl)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                true
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
+            .build()
+
+        val openApp = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, PlayerActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        session = MediaSession.Builder(this, exo)
+            .setBitmapLoader(ThumbLoader(this))
+            .setSessionActivity(openApp)
+            .build()
+
+        SleepTimer.player = exo
+        Fx.attach(exo.audioSessionId)
+        exo.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioSessionIdChanged(eventTime: AnalyticsListener.EventTime, audioSessionId: Int) {
+                Fx.attach(audioSessionId)
+            }
+        })
+
+        exo.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                Toast.makeText(this@PlaybackService, "প্লে করা যায়নি (${error.errorCodeName})", Toast.LENGTH_LONG).show()
+                // একটা ফাইল নষ্ট হলে লিস্ট আটকে না থেকে পরেরটায় যাবে
+                if (exo.hasNextMediaItem()) {
+                    exo.seekToNextMediaItem()
+                    exo.prepare()
+                    exo.play()
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // একবার প্লে শুরু হলেই ভিডিওটা "দেখা" — NEW ট্যাগ আর থাকবে না
+                if (isPlaying) Seen.mark(this@PlaybackService, exo.currentMediaItem?.mediaId)
+                handler.removeCallbacks(saver)
+                if (isPlaying) handler.postDelayed(saver, 10_000) else saveResume()
+            }
+
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                if (exo.isPlaying) Seen.mark(this@PlaybackService, mediaItem?.mediaId)
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                val id = oldPosition.mediaItem?.mediaId ?: return
+                if (oldPosition.mediaItemIndex == newPosition.mediaItemIndex) return
+                val value = if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) 0L
+                else oldPosition.positionMs
+                prefs().edit().putLong(id, value).apply()
+            }
+        })
+    }
+
+    private fun prefs() = getSharedPreferences("resume", MODE_PRIVATE)
+
+    private fun saveResume() {
+        val id = exo.currentMediaItem?.mediaId ?: return
+        val dur = exo.duration
+        val pos = exo.currentPosition
+        val value = if (dur > 0 && pos > dur - 5000) 0L else pos
+        prefs().edit().putLong(id, value).apply()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // অ্যাপ সোয়াইপ করে সরালে: কিছু না বাজলে সার্ভিস বন্ধ
+        if (!exo.playWhenReady || exo.mediaItemCount == 0) stopSelf()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        saveResume()
+        SleepTimer.cancel()
+        SleepTimer.player = null
+        Fx.release()
+        session?.run {
+            player.release()
+            release()
+        }
+        session = null
+        super.onDestroy()
+    }
+}
+
+/** নোটিফিকেশন/লক স্ক্রিনের জন্য ভিডিওর থাম্বনেইল লোড করে। */
+@androidx.annotation.OptIn(UnstableApi::class)
+class ThumbLoader(private val ctx: Context) : BitmapLoader {
+    private val exec = MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())
+
+    override fun supportsMimeType(mimeType: String): Boolean = true
+
+    override fun decodeBitmap(data: ByteArray): ListenableFuture<Bitmap> =
+        exec.submit(Callable<Bitmap> {
+            BitmapFactory.decodeByteArray(data, 0, data.size)
+                ?: throw IllegalStateException("decode failed")
+        })
+
+    override fun loadBitmap(uri: Uri): ListenableFuture<Bitmap> =
+        exec.submit(Callable<Bitmap> {
+            val bmp: Bitmap? = if (Build.VERSION.SDK_INT >= 29) {
+                ctx.contentResolver.loadThumbnail(uri, Size(512, 512), null)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaStore.Video.Thumbnails.getThumbnail(
+                    ctx.contentResolver, android.content.ContentUris.parseId(uri),
+                    MediaStore.Video.Thumbnails.MINI_KIND, null
+                )
+            }
+            bmp ?: throw IllegalStateException("no thumbnail")
+        })
+}
+
+/** অ্যাক্টিভিটি থেকে সার্ভিসের প্লেয়ারে সংযোগ। */
+object PlayerLink {
+    private val main = Handler(Looper.getMainLooper())
+    private val mainExecutor = Executor { main.post(it) }
+
+    fun connect(ctx: Context, onReady: (MediaController) -> Unit): ListenableFuture<MediaController> {
+        val token = SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))
+        val future = MediaController.Builder(ctx, token).buildAsync()
+        future.addListener(Runnable {
+            try {
+                onReady(future.get())
+            } catch (e: Exception) {
+                Log.e("PlayerLink", "connect failed", e)
+            }
+        }, mainExecutor)
+        return future
+    }
+}
+TANVIR_EOF_END
+mkdir -p "TanvirMix/app/src/main/java/com/tanvir/mix"
+cat > "TanvirMix/app/src/main/java/com/tanvir/mix/PlayerActivity.kt" <<'TANVIR_EOF_END'
+package com.tanvir.mix
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.app.PictureInPictureParams
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.util.Rational
+import android.view.GestureDetector
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.PixelCopy
+import android.view.SurfaceView
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.SeekBar
+import android.widget.Switch
+import android.widget.TextView
+import android.widget.Toast
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.MediaController
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
+import java.util.Locale
+import kotlin.math.abs
+
+@androidx.annotation.OptIn(UnstableApi::class)
+class PlayerActivity : Activity() {
+
+    companion object {
+        const val EXTRA_FOLDER = "folder"
+        const val EXTRA_AUDIO = "audio_mode"
+        const val EXTRA_AUDIO_FOLDER = "audio_folder"
+        const val EXTRA_AUDIO_URI = "audio_uri"
+        private const val SEEK_STEP = 10_000L
+    }
+
+    /** প্যানেলের একটি বাটন (গোল আইকন + নিচে লেখা) */
+    private class Chip(val root: LinearLayout, val icon: TextView, val label: TextView) {
+        var on = false
+        var iconRes = 0
+    }
+
+    private var controller: MediaController? = null
+    private var future: ListenableFuture<MediaController>? = null
+
+    private lateinit var audio: AudioManager
+    private lateinit var prefs: SharedPreferences
+    private lateinit var playerView: PlayerView
+    private lateinit var root: FrameLayout
+    private lateinit var ctrl: FrameLayout
+    private lateinit var dim: View
+    private lateinit var titleView: TextView
+    private lateinit var hud: TextView
+    private lateinit var unlockBtn: TextView
+    private lateinit var lockBtn: ImageButton
+    private lateinit var playBtn: ImageButton
+    private lateinit var prevBtn: ImageButton
+    private lateinit var nextBtn: ImageButton
+    private lateinit var seek: SeekBar
+    private lateinit var posText: TextView
+    private lateinit var durText: TextView
+    private lateinit var audioArt: LinearLayout
+    private lateinit var audioTitle: TextView
+    private lateinit var audioSub: TextView
+
+    private lateinit var cNight: Chip
+    private lateinit var cShuffle: Chip
+    private lateinit var cLoop: Chip
+    private lateinit var cMute: Chip
+    private lateinit var cSleep: Chip
+    private lateinit var cAb: Chip
+    private lateinit var cSpeed: Chip
+
+    private val ui = Handler(Looper.getMainLooper())
+    private val speeds = floatArrayOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f, 4f)
+    private val resizeModes = intArrayOf(
+        AspectRatioFrameLayout.RESIZE_MODE_FIT,
+        AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
+        AspectRatioFrameLayout.RESIZE_MODE_FILL
+    )
+    private val resizeNames = arrayOf("ফিট", "জুম", "ফিল (স্ক্রিন ভরাট)")
+    private var resizeIdx = 0
+
+    private var started = false
+    private var locked = false
+    private var dragging = false
+    private var controlsVisible = true
+    private var gestureMode = 0 // 0 = কিছু না, 1 = আড়াআড়ি (সিক), 2 = লম্বালম্বি (ভলিউম/ব্রাইটনেস)
+    private var volumeAcc = 0f
+    private var seekTarget = 0L
+    private var abA = -1L
+    private var abB = -1L
+    private var lastItemId: String? = null
+
+    private val playerListener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) { updateState() }
+    }
+
+    private val hideControlsRunnable = Runnable { hideControls() }
+    private val hideHudRunnable = Runnable { hud.visibility = View.GONE }
+    private val hideUnlockRunnable = Runnable { unlockBtn.visibility = View.GONE }
+
+    private val tick = object : Runnable {
+        override fun run() {
+            val c = controller
+            if (c != null) {
+                if (abB >= 0 && c.currentPosition >= abB) c.seekTo(abA)
+                if (controlsVisible && !dragging) {
+                    val dur = if (c.duration > 0) c.duration else 0L
+                    val pos = c.currentPosition.coerceIn(0L, if (dur > 0) dur else Long.MAX_VALUE)
+                    seek.max = dur.toInt()
+                    seek.progress = pos.toInt()
+                    posText.text = fmtTime(pos)
+                    durText.text = fmtTime(dur)
+                }
+            }
+            val delay = if (abB >= 0) 250L else if (controlsVisible) 500L else 1000L
+            ui.postDelayed(this, delay)
+        }
+    }
+
+    // ---------- লাইফসাইকেল ----------
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        prefs = getSharedPreferences("resume", MODE_PRIVATE)
+
+        buildUi()
+        setupGestures()
+        hideSystemBars()
+
+        future = PlayerLink.connect(this) { c ->
+            controller = c
+            attach(c)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        controller?.let { attach(it) }
+    }
+
+    /** কন্ট্রোলার তৈরি হলে: দরকার হলে প্লেলিস্ট সেট করে, তারপর স্ক্রিনের সাথে জুড়ে দেয়। */
+    private fun attach(c: MediaController) {
+        val audioMode = intent.getBooleanExtra(EXTRA_AUDIO, false)
+        val uriStr = if (audioMode) intent.getStringExtra(EXTRA_AUDIO_URI) else intent.data?.toString()
+        if (uriStr != null && c.currentMediaItem?.mediaId != uriStr) {
+            val items: List<MediaItem>
+            var start = 0
+            if (audioMode) {
+                val folder = intent.getStringExtra(EXTRA_AUDIO_FOLDER)
+                val tracks = AudioRepo.queryAll(this).let { all -> if (folder == null) all else all.filter { it.folder == folder } }
+                items = tracks.map { AudioRepo.toItem(it) }
+                start = tracks.indexOfFirst { it.uri.toString() == uriStr }.coerceAtLeast(0)
+            } else {
+                val folder = intent.getStringExtra(EXTRA_FOLDER)
+                if (folder != null) {
+                    val vids = MediaRepo.inFolder(this, folder)
+                    items = vids.map { MediaRepo.toItem(it) }
+                    start = vids.indexOfFirst { it.uri.toString() == uriStr }.coerceAtLeast(0)
+                } else {
+                    items = listOf(MediaRepo.singleItem(this, intent.data!!))
+                }
+            }
+            if (items.isNotEmpty()) {
+                c.setMediaItems(items, start, prefs.getLong(uriStr, 0L))
+                c.prepare()
+                c.play()
+            }
+        } else if (c.mediaItemCount == 0) {
+            finish(); return
+        }
+
+        c.removeListener(playerListener)
+        c.addListener(playerListener)
+        playerView.player = c
+        // সার্ভিসের প্লেয়ার ভিডিও-ট্র্যাক বন্ধ অবস্থা মনে রাখে; নতুন অ্যাক্টিভিটিতে আবার চালু করতে হবে
+        if (started) setVideoEnabled(true)
+        updateState()
+        ui.removeCallbacks(tick)
+        ui.post(tick)
+        showControls()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        setVideoEnabled(true)
+        if (controller != null) {
+            ui.removeCallbacks(tick)
+            ui.post(tick)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        started = false
+        ui.removeCallbacks(tick)
+        // PiP উইন্ডো ক্রস করে বন্ধ করলে বা ব্যাকগ্রাউন্ডে গেলে — গান থামবে না,
+        // শুধু অডিও চলতে থাকবে; ভিডিও ডিকোড বন্ধ (ব্যাটারি বাঁচে, ফোন গরম হয় না)
+        setVideoEnabled(false)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        hideSystemBars()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ui.removeCallbacksAndMessages(null)
+        controller?.removeListener(playerListener)
+        playerView.player = null
+        future?.let { MediaController.releaseFuture(it) }
+        controller = null
+    }
+
+    private fun setVideoEnabled(enabled: Boolean) {
+        val c = controller ?: return
+        c.trackSelectionParameters = c.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
+            .build()
+    }
+
+    // ---------- UI ----------
+
+    private fun buildUi() {
+        playerView = PlayerView(this).apply {
+            useController = false
+            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+        }
+
+        // টপ বার
+        val backBtn = iconBtn(R.drawable.ic_back, 44, 10) { finish() }
+        titleView = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 16f
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.MARQUEE
+            marqueeRepeatLimit = -1
+            isSelected = true
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val moreBtn = iconBtn(R.drawable.ic_more, 44, 10) { showMore(it) }
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), 0)
+            addView(backBtn); addView(titleView); addView(moreBtn)
+        }
+
+        // টুল প্যানেল (MX Player-এর মতো)
+        cNight = chip(R.drawable.ic3d_moon, "নাইট মোড") { toggleNight() }
+        cShuffle = chip(R.drawable.ic3d_shuffle, "শাফল") { controller?.let { it.shuffleModeEnabled = !it.shuffleModeEnabled } }
+        cLoop = chip(R.drawable.ic3d_repeat, "লুপ") { cycleLoop() }
+        cMute = chip(R.drawable.ic3d_volume, "নিঃশব্দ") { toggleMute() }
+        cSleep = chip(R.drawable.ic3d_timer, "স্লিপ টাইমার") { showSleepDialog() }
+        cAb = chip(0, "A - B", "A-B", 12f) { cycleAb() }
+        val cEffects = chip(R.drawable.ic3d_tune, "অডিও ইফেক্ট") { showEffects() }
+        val cEq = chip(R.drawable.ic3d_eq, "ইকুয়ালাইজার") { showEqualizer() }
+        cSpeed = chip(0, "গতি", "1x", 13f) { showSpeedDialog() }
+        val cShot = chip(R.drawable.ic3d_camera, "স্ক্রিনশট") { takeScreenshot() }
+        val cBg = chip(R.drawable.ic3d_headphones, "ব্যাকগ্রাউন্ডে প্লে") { playInBackground() }
+        val cRot = chip(R.drawable.ic3d_rotate, "স্ক্রিন রোটেশন") { rotateScreen() }
+        val panelRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            for (ch in listOf(cNight, cShuffle, cLoop, cMute, cSleep, cAb, cEffects, cEq, cSpeed, cShot, cBg, cRot)) {
+                addView(ch.root)
+            }
+        }
+        val panel = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(panelRow)
+        }
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xCC000000.toInt(), 0x00000000)
+            )
+            setPadding(0, 0, 0, dp(16))
+            addView(topRow); addView(panel)
+        }
+
+        // নিচের সিকবার + বাটন
+        posText = TextView(this).apply { setTextColor(Color.WHITE); textSize = 13f; text = "0:00" }
+        durText = TextView(this).apply { setTextColor(Color.WHITE); textSize = 13f; text = "0:00" }
+        seek = SeekBar(this).apply {
+            progressTintList = ColorStateList.valueOf(ACCENT)
+            thumbTintList = ColorStateList.valueOf(ACCENT)
+            progressBackgroundTintList = ColorStateList.valueOf(0x55FFFFFF)
+            layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                    if (fromUser) posText.text = fmtTime(progress.toLong())
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {
+                    dragging = true
+                    ui.removeCallbacks(hideControlsRunnable)
+                }
+                override fun onStopTrackingTouch(sb: SeekBar) {
+                    dragging = false
+                    controller?.seekTo(sb.progress.toLong())
+                    scheduleHide()
+                }
+            })
+        }
+        val seekRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(16), 0)
+            addView(posText); addView(seek); addView(durText)
+        }
+
+        lockBtn = iconBtn(R.drawable.ic_unlock, 44, 11) { setLocked(true) }
+        prevBtn = iconBtn(R.drawable.ic_prev, 52, 12) {
+            controller?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() }
+        }
+        playBtn = iconBtn(R.drawable.ic_pause, 68, 14) { togglePlay() }
+        nextBtn = iconBtn(R.drawable.ic_next, 52, 12) {
+            controller?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
+        }
+        val ratioBtn = iconBtn(R.drawable.ic_aspect, 44, 11) { cycleResize() }
+        val pipBtn = iconBtn(R.drawable.ic_pip, 44, 11) { enterPip() }
+        fun spacer() = View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(12), dp(8))
+            addView(lockBtn)
+            addView(spacer())
+            addView(prevBtn); addView(playBtn); addView(nextBtn)
+            addView(spacer())
+            addView(ratioBtn); addView(pipBtn)
+        }
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(20), 0, dp(4))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xCC000000.toInt(), 0x00000000)
+            )
+            addView(seekRow); addView(btnRow)
+        }
+
+        ctrl = FrameLayout(this).apply {
+            val mp = ViewGroup.LayoutParams.MATCH_PARENT
+            val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+            addView(top, FrameLayout.LayoutParams(mp, wc, Gravity.TOP))
+            addView(bottom, FrameLayout.LayoutParams(mp, wc, Gravity.BOTTOM))
+        }
+
+        hud = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 22f; gravity = Gravity.CENTER
+            background = roundedBg(0xAA000000.toInt(), dp(14).toFloat())
+            setPadding(dp(22), dp(12), dp(22), dp(12))
+            visibility = View.GONE
+        }
+        unlockBtn = TextView(this).apply {
+            text = "🔒"; textSize = 22f; gravity = Gravity.CENTER
+            background = roundedBg(0xAA000000.toInt(), dp(24).toFloat())
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            visibility = View.GONE
+            setOnClickListener { setLocked(false) }
+        }
+
+        // শুধু অডিও ফাইলের জন্য কার্ড (কালো স্ক্রিনের বদলে)
+        val note = TextView(this).apply {
+            text = "♫"; textSize = 64f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            background = roundedBg(0xFF2A303B.toInt(), dp(28).toFloat())
+            layoutParams = LinearLayout.LayoutParams(dp(160), dp(160))
+        }
+        audioTitle = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER
+            maxLines = 2; setPadding(dp(24), dp(20), dp(24), dp(4))
+        }
+        audioSub = TextView(this).apply { setTextColor(TEXT_DIM); textSize = 14f; gravity = Gravity.CENTER }
+        audioArt = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            setBackgroundColor(BG); visibility = View.GONE
+            addView(note); addView(audioTitle); addView(audioSub)
+        }
+
+        // নাইট মোড: স্ক্রিন অন্ধকার করার স্তর
+        dim = View(this).apply {
+            setBackgroundColor(0xB8000000.toInt())
+            visibility = View.GONE
+        }
+
+        root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            val mp = ViewGroup.LayoutParams.MATCH_PARENT
+            addView(playerView, FrameLayout.LayoutParams(mp, mp))
+            addView(audioArt, FrameLayout.LayoutParams(mp, mp))
+            addView(dim, FrameLayout.LayoutParams(mp, mp))
+            addView(ctrl, FrameLayout.LayoutParams(mp, mp))
+            addView(hud, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL or Gravity.TOP
+            ).apply { topMargin = dp(150) })
+            addView(unlockBtn, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.START or Gravity.CENTER_VERTICAL
+            ).apply { leftMargin = dp(24) })
+        }
+        setContentView(root)
+    }
+
+    private fun iconBtn(res: Int, sizeDp: Int, padDp: Int, onClick: (View) -> Unit) = ImageButton(this).apply {
+        setImageResource(res)
+        setColorFilter(Color.WHITE)
+        setBackgroundColor(Color.TRANSPARENT)
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setPadding(dp(padDp), dp(padDp), dp(padDp), dp(padDp))
+        layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        setOnClickListener { onClick(it); scheduleHide() }
+    }
+
+    /** 3D-look গোল বাটন: ওপরে হালকা, নিচে গাঢ় গ্রেডিয়েন্ট + হালকা বর্ডার ও ছায়া। */
+    private fun chipShape(on: Boolean): GradientDrawable = GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        if (on) intArrayOf(0xFFFF7468.toInt(), 0xFFD3281D.toInt())
+        else intArrayOf(0xFF434A57.toInt(), 0xFF1C2027.toInt())
+    ).apply {
+        shape = GradientDrawable.OVAL
+        setStroke(dp(1), if (on) 0x55FFFFFF else 0x33FFFFFF)
+    }
+
+    private fun applyChipBg(ch: Chip) {
+        val shape = chipShape(ch.on)
+        ch.icon.background = if (ch.iconRes != 0) {
+            val ic = resources.getDrawable(ch.iconRes, theme).mutate()
+            LayerDrawable(arrayOf(shape, ic)).apply {
+                val pad = dp(CHIP_ICON_PAD)
+                setLayerInset(1, pad, pad, pad, pad)
+            }
+        } else shape
+    }
+
+    private fun chip(iconRes: Int, label: String, symbol: String = "", symSize: Float = 12f, onClick: () -> Unit): Chip {
+        val icon = TextView(this).apply {
+            text = symbol; textSize = symSize; gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setShadowLayer(dp(1).toFloat(), 0f, dp(1).toFloat(), 0x99000000.toInt())
+            elevation = dp(3).toFloat()
+            layoutParams = LinearLayout.LayoutParams(dp(CHIP_SIZE), dp(CHIP_SIZE))
+        }
+        val cap = TextView(this).apply {
+            text = label; textSize = 9f; gravity = Gravity.CENTER
+            setTextColor(0xFFE6E9EF.toInt()); maxLines = 2
+            setPadding(0, dp(5), 0, 0)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(dp(60), ViewGroup.LayoutParams.WRAP_CONTENT)
+            isClickable = true
+            addView(icon); addView(cap)
+            setOnClickListener { onClick(); scheduleHide() }
+        }
+        return Chip(box, icon, cap).also { it.iconRes = iconRes; applyChipBg(it) }
+    }
+
+    private fun setChip(ch: Chip, on: Boolean) {
+        if (ch.on == on) return
+        ch.on = on
+        applyChipBg(ch)
+    }
+
+    // ---------- অবস্থা আপডেট ----------
+
+    private fun updateState() {
+        val c = controller ?: return
+        titleView.text = c.mediaMetadata.title ?: c.currentMediaItem?.mediaMetadata?.title ?: ""
+        val playing = c.playWhenReady && c.playbackState != Player.STATE_ENDED
+        playBtn.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+        if (playing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        val id = c.currentMediaItem?.mediaId
+        if (id != lastItemId) {
+            lastItemId = id
+            abA = -1L; abB = -1L
+        }
+
+        val groups = c.currentTracks.groups
+        val audioOnly = groups.isNotEmpty() && groups.none { it.type == C.TRACK_TYPE_VIDEO }
+        audioArt.visibility = if (audioOnly) View.VISIBLE else View.GONE
+        audioTitle.text = titleView.text
+        audioSub.text = c.mediaMetadata.artist ?: c.mediaMetadata.albumTitle ?: ""
+
+        prevBtn.alpha = if (c.hasPreviousMediaItem()) 1f else 0.35f
+        nextBtn.alpha = if (c.hasNextMediaItem()) 1f else 0.35f
+
+        setChip(cShuffle, c.shuffleModeEnabled)
+        when (c.repeatMode) {
+            Player.REPEAT_MODE_ONE -> { setChip(cLoop, true); cLoop.label.text = "১টি লুপ" }
+            Player.REPEAT_MODE_ALL -> { setChip(cLoop, true); cLoop.label.text = "সব লুপ" }
+            else -> { setChip(cLoop, false); cLoop.label.text = "লুপ" }
+        }
+        val muted = c.volume == 0f
+        setChip(cMute, muted)
+        val muteRes = if (muted) R.drawable.ic3d_volume_off else R.drawable.ic3d_volume
+        if (cMute.iconRes != muteRes) { cMute.iconRes = muteRes; applyChipBg(cMute) }
+        val sp = c.playbackParameters.speed
+        cSpeed.icon.text = speedLabel(sp)
+        setChip(cSpeed, abs(sp - 1f) > 0.01f)
+        setChip(cSleep, SleepTimer.active)
+        updateAbChip()
+
+        if (!playing) { ui.removeCallbacks(hideControlsRunnable) } else if (controlsVisible) scheduleHide()
+    }
+
+    private fun updateAbChip() {
+        setChip(cAb, abA >= 0)
+        cAb.label.text = when {
+            abA >= 0 && abB < 0 -> "A: ${fmtTime(abA)}"
+            abA >= 0 -> "A-B চালু"
+            else -> "A - B"
+        }
+    }
+
+    private fun togglePlay() {
+        val c = controller ?: return
+        if (c.playWhenReady && c.playbackState != Player.STATE_ENDED) c.pause()
+        else {
+            if (c.playbackState == Player.STATE_ENDED) c.seekToDefaultPosition()
+            c.play()
+        }
+    }
+
+    private fun seekBy(deltaMs: Long) {
+        val c = controller ?: return
+        val dur = if (c.duration > 0) c.duration else Long.MAX_VALUE
+        c.seekTo((c.currentPosition + deltaMs).coerceIn(0L, dur))
+    }
+
+    private fun speedLabel(s: Float) = if (s % 1f == 0f) "${s.toInt()}x" else "${s}x"
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    // ---------- প্যানেলের কাজ ----------
+
+    private fun toggleNight() {
+        val on = dim.visibility != View.VISIBLE
+        dim.visibility = if (on) View.VISIBLE else View.GONE
+        setChip(cNight, on)
+    }
+
+    private fun cycleLoop() {
+        val c = controller ?: return
+        c.repeatMode = when (c.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+            Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+    }
+
+    private fun toggleMute() {
+        val c = controller ?: return
+        c.volume = if (c.volume > 0f) 0f else 1f
+    }
+
+    private fun cycleAb() {
+        val c = controller ?: return
+        when {
+            abA < 0 -> { abA = c.currentPosition; toast("A সেট: ${fmtTime(abA)}") }
+            abB < 0 -> {
+                if (c.currentPosition > abA + 500) {
+                    abB = c.currentPosition
+                    c.seekTo(abA)
+                    toast("A-B রিপিট চালু")
+                } else toast("B অবশ্যই A এর পরে হতে হবে")
+            }
+            else -> { abA = -1L; abB = -1L; toast("A-B বন্ধ") }
+        }
+        updateAbChip()
+        ui.removeCallbacks(tick)
+        ui.post(tick)
+    }
+
+    private fun showSpeedDialog() {
+        val c = controller ?: return
+        val cur = speeds.indices.minByOrNull { abs(speeds[it] - c.playbackParameters.speed) } ?: 3
+        singleChoice("প্লেব্যাক গতি", Array(speeds.size) { speedLabel(speeds[it]) }, cur) {
+            c.setPlaybackSpeed(speeds[it])
+        }
+    }
+
+    private fun showSleepDialog() {
+        val mins = intArrayOf(0, 15, 30, 45, 60, 90)
+        val labels = arrayOf("বন্ধ", "১৫ মিনিট", "৩০ মিনিট", "৪৫ মিনিট", "৬০ মিনিট", "৯০ মিনিট")
+        val title = if (SleepTimer.active) "স্লিপ টাইমার (বাকি ~${SleepTimer.remainingMin()} মিনিট)" else "স্লিপ টাইমার"
+        singleChoice(title, labels, if (SleepTimer.active) -1 else 0) {
+            if (mins[it] == 0) {
+                SleepTimer.cancel(); toast("টাইমার বন্ধ")
+            } else {
+                SleepTimer.start(mins[it]); toast("${labels[it]} পরে প্লেব্যাক থামবে")
+            }
+            updateState()
+        }
+    }
+
+    private fun cycleResize() {
+        resizeIdx = (resizeIdx + 1) % resizeModes.size
+        playerView.setResizeMode(resizeModes[resizeIdx])
+        showHud(resizeNames[resizeIdx])
+    }
+
+    private fun rotateScreen() {
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    }
+
+    private fun playInBackground() {
+        val c = controller ?: return
+        c.play()
+        toast("ব্যাকগ্রাউন্ডে চলছে")
+        finish()
+    }
+
+    private fun takeScreenshot() {
+        val sv = playerView.videoSurfaceView as? SurfaceView
+        val vs = controller?.videoSize
+        if (sv == null || vs == null || vs.width <= 0 || vs.height <= 0) {
+            toast("স্ক্রিনশট নেওয়া যায়নি"); return
+        }
+        try {
+            val bmp = Bitmap.createBitmap(vs.width, vs.height, Bitmap.Config.ARGB_8888)
+            PixelCopy.request(sv, bmp, PixelCopy.OnPixelCopyFinishedListener { result ->
+                if (result == PixelCopy.SUCCESS) saveShot(bmp) else toast("স্ক্রিনশট নেওয়া যায়নি")
+            }, ui)
+        } catch (e: Throwable) {
+            toast("স্ক্রিনশট নেওয়া যায়নি")
+        }
+    }
+
+    private fun saveShot(bmp: Bitmap) {
+        Thread {
+            var ok = false
+            try {
+                val name = "TanvirMix_${System.currentTimeMillis()}.jpg"
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val cv = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/TanvirMix")
+                    }
+                    val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+                    if (uri != null) {
+                        contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                        ok = true
+                    }
+                } else {
+                    val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                    if (dir != null) {
+                        File(dir, name).outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                        ok = true
+                    }
+                }
+            } catch (e: Throwable) { ok = false }
+            bmp.recycle()
+            runOnUiThread { toast(if (ok) "স্ক্রিনশট সেভ হয়েছে (Pictures/TanvirMix)" else "সেভ করা যায়নি") }
+        }.start()
+    }
+
+    // ---------- ⋮ মেনু: অডিও ট্র্যাক, সাবটাইটেল, তথ্য ----------
+
+    private fun showMore(anchor: View) {
+        val m = PopupMenu(this, anchor)
+        m.menu.add(0, 1, 0, "অডিও ট্র্যাক")
+        m.menu.add(0, 2, 1, "সাবটাইটেল")
+        m.menu.add(0, 3, 2, "ভিডিও তথ্য")
+        m.setOnMenuItemClickListener {
+            when (it.itemId) {
+                1 -> showTrackDialog(C.TRACK_TYPE_AUDIO, "অডিও ট্র্যাক")
+                2 -> showTrackDialog(C.TRACK_TYPE_TEXT, "সাবটাইটেল")
+                3 -> showInfo()
+            }
+            true
+        }
+        m.show()
+    }
+
+    private fun showTrackDialog(type: Int, title: String) {
+        val c = controller ?: return
+        val groups = c.currentTracks.groups.filter { it.type == type }
+        if (groups.isEmpty()) { toast("কিছু পাওয়া যায়নি"); return }
+        val labels = ArrayList<String>()
+        val picks = ArrayList<Pair<Tracks.Group, Int>?>()
+        var checked = -1
+        if (type == C.TRACK_TYPE_TEXT) {
+            labels += "বন্ধ"; picks += null
+            if (groups.none { it.isSelected }) checked = 0
+        }
+        for (g in groups) {
+            for (i in 0 until g.length) {
+                if (!g.isTrackSupported(i)) continue
+                val f = g.getTrackFormat(i)
+                val lang = f.language?.takeIf { it != "und" }?.let { Locale(it).displayLanguage }
+                var name = f.label ?: lang ?: "ট্র্যাক ${labels.size + 1}"
+                if (type == C.TRACK_TYPE_AUDIO && f.channelCount > 0) name += " • ${f.channelCount}ch"
+                labels += name; picks += Pair(g, i)
+                if (g.isTrackSelected(i)) checked = labels.size - 1
+            }
+        }
+        singleChoice(title, labels.toTypedArray(), checked) { which ->
+            val pick = picks[which]
+            val b = c.trackSelectionParameters.buildUpon()
+            if (pick == null) {
+                b.setTrackTypeDisabled(type, true)
+            } else {
+                b.setTrackTypeDisabled(type, false)
+                b.setOverrideForType(TrackSelectionOverride(pick.first.mediaTrackGroup, pick.second))
+            }
+            c.trackSelectionParameters = b.build()
+        }
+    }
+
+    private fun showInfo() {
+        val c = controller ?: return
+        val vs = c.videoSize
+        val res = if (vs.width > 0) "${vs.width} x ${vs.height}" else "—"
+        val msg = "নাম: ${c.mediaMetadata.title ?: ""}\nরেজুলুশন: $res\nসময়: ${fmtTime(if (c.duration > 0) c.duration else 0L)}\nগতি: ${speedLabel(c.playbackParameters.speed)}"
+        val d = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("ভিডিও তথ্য").setMessage(msg).setPositiveButton("ঠিক আছে", null).create()
+        d.setOnDismissListener { hideSystemBars() }
+        d.show()
+    }
+
+    // ---------- ইকুয়ালাইজার ও অডিও ইফেক্ট ----------
+
+    private fun showEqualizer() {
+        if (!Fx.eqAvailable()) { toast("এই ফোনে ইকুয়ালাইজার চালু করা যায়নি"); return }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(4))
+        }
+        val sw = Switch(this).apply {
+            text = "ইকুয়ালাইজার চালু"
+            isChecked = Fx.eqOn
+            setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, on -> Fx.setEqOn(on) }
+        }
+        box.addView(sw)
+
+        val bars = ArrayList<SeekBar>()
+        val min = Fx.minLevel()
+        val presetBtn = TextView(this).apply {
+            text = "প্রিসেট বাছুন ▾"
+            setTextColor(ACCENT); textSize = 15f
+            setPadding(0, dp(12), 0, dp(8))
+            setOnClickListener {
+                val n = Fx.presetCount()
+                if (n == 0) return@setOnClickListener
+                singleChoice("প্রিসেট", Array(n) { Fx.presetName(it) }, Fx.currentPreset()) { p ->
+                    Fx.usePreset(p)
+                    for (i in bars.indices) bars[i].progress = Fx.level(i) - min
+                    if (!Fx.eqOn) { sw.isChecked = true }
+                    Fx.save()
+                }
+            }
+        }
+        box.addView(presetBtn)
+
+        for (i in 0 until Fx.bandCount()) {
+            val hz = Fx.freqHz(i)
+            val labelText = if (hz >= 1000) "${hz / 1000} kHz" else "$hz Hz"
+            box.addView(TextView(this).apply { text = labelText; setTextColor(TEXT_DIM); textSize = 12f })
+            val sb = SeekBar(this).apply {
+                max = Fx.maxLevel() - min
+        
